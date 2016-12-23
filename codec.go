@@ -7,8 +7,14 @@ import (
 	"io"
 )
 
+const MaxStreamId = 0x007fffff	// 23 bits
+const FragmentMask = 1 << 23	// 24th bit signals fragment
+
 const TdispatchTpe = 2
 const RdispatchTpe = -2
+
+const TpingTpe = 65
+const RpingTpe = -65
 
 type Frame struct {
 	frameType int8
@@ -16,19 +22,19 @@ type Frame struct {
 	message   Message
 }
 
-func EncodeFrame(frame *Frame, writer io.Writer) (err error) {
+func EncodeFrame(frame *Frame, writer io.Writer) error {
 	// Write the message size as a prefix
 	size := frame.message.Size() + 4
 
-	err = binary.Write(writer, binary.BigEndian, size)
+	err := binary.Write(writer, binary.BigEndian, size)
 	if err != nil {
-		return
+		return err
 	}
 
 	header := int32(frame.frameType)<<24 | frame.streamId
 	err = binary.Write(writer, binary.BigEndian, header)
 	if err != nil {
-		return
+		return err
 	}
 
 	return frame.message.Encode(writer)
@@ -37,7 +43,7 @@ func EncodeFrame(frame *Frame, writer io.Writer) (err error) {
 type Message interface {
 	Type() int8                   // Message type
 	Size() int                    // Message size not counting type tag or length prefix
-	Encode(write io.Writer) error // Encode this message into a stream
+	Encode(write io.Writer) error // Encode message into the stream. Doesn't include the type type, streamid, or frame length prefix
 }
 
 type Header struct {
@@ -54,6 +60,34 @@ type Tdispatch struct {
 type Rdispatch struct {
 	Contexts []Header
 	Body     []byte
+}
+
+type Tping struct {}
+
+type Rping struct {}
+
+func (t *Tping) Type() int8 {
+	return TpingTpe
+}
+
+func (_ *Tping) Size() int {
+	return 0
+}
+
+func (_ *Tping) Encode(write io.Writer) error {
+	return nil
+}
+
+func (_ *Rping) Encode(write io.Writer) error {
+	return nil
+}
+
+func (_ *Rping) Type() int8 {
+	return RpingTpe
+}
+
+func (_ *Rping) Size() int {
+	return 0
 }
 
 func (r *Rdispatch) Type() int8 {
@@ -251,6 +285,13 @@ func decodeMessage(input io.Reader, size int32) (tpe int8, stream int32, msg Mes
 		}
 
 		return
+
+	case TpingTpe:
+		msg = &Tping{}
+
+	case RpingTpe:
+		msg = &Rping{}
+
 
 	default:
 		err = errors.New(fmt.Sprintf("Found invalid frame type: %d", tpe))
