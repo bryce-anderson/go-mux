@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 )
 
 const MaxStreamId = 0x007fffff	// 23 bits
@@ -17,16 +18,21 @@ const TpingTpe = 65
 const RpingTpe = -65
 
 type Frame struct {
-	frameType int8
-	streamId  int32
-	message   Message
+	frameType 	int8
+	isFragment	bool
+	streamId  	int32
+	message   	Message
+}
+
+func isFrameFragment(streamId int32) bool {
+	return (streamId & FragmentMask) != 0
 }
 
 func EncodeFrame(frame *Frame, writer io.Writer) error {
 	// Write the message size as a prefix
 	size := frame.message.Size() + 4
 
-	err := binary.Write(writer, binary.BigEndian, size)
+	err := binary.Write(writer, binary.BigEndian, int32(size))
 	if err != nil {
 		return err
 	}
@@ -53,13 +59,19 @@ type Header struct {
 
 type Tdispatch struct {
 	Contexts []Header
+	Dest 	 string
 	Dtabs    []Header
 	Body     []byte
 }
 
 type Rdispatch struct {
+	Status   int8
 	Contexts []Header
 	Body     []byte
+}
+
+type Fragment struct {
+	Body	[]byte
 }
 
 type Tping struct {}
@@ -95,12 +107,15 @@ func (r *Rdispatch) Type() int8 {
 }
 
 func (r *Rdispatch) Size() int {
-	acc := headersSize(r.Contexts)
+	acc := 1	// status
+	acc += headersSize(r.Contexts)
 	acc += len(r.Body)
 	return acc
 }
 
 func (r *Rdispatch) Encode(writer io.Writer) (err error) {
+	// encode the status
+	binary.Write(writer, binary.BigEndian, r.Status)
 	// encode headers
 	err = encodeHeaders(r.Contexts, writer)
 
@@ -115,6 +130,7 @@ func (r *Rdispatch) Encode(writer io.Writer) (err error) {
 
 func (t *Tdispatch) Size() int {
 	acc := headersSize(t.Contexts)
+	acc += 2 + len(t.Dest)
 	acc += headersSize(t.Dtabs)
 	acc += len(t.Body)
 	return acc
@@ -126,6 +142,11 @@ func (t *Tdispatch) Type() int8 {
 
 func (t *Tdispatch) Encode(writer io.Writer) (err error) {
 	err = encodeHeaders(t.Contexts, writer)
+	if err != nil {
+		return
+	}
+
+	err = encodeBytesInt16([]byte(t.Dest), writer)
 	if err != nil {
 		return
 	}
@@ -156,7 +177,7 @@ func encodeHeaders(headers []Header, writer io.Writer) (err error) {
 	// write the count
 	l := len(headers)
 
-	if l > binary.MaxVarintLen16 {
+	if l > math.MaxInt16 {
 		return errors.New(fmt.Sprintf("Too many headers: %d", l))
 	}
 
@@ -192,7 +213,7 @@ func encodeHeader(header *Header, writer io.Writer) error {
 func encodeBytesInt16(bytes []byte, writer io.Writer) (err error) {
 	length := len(bytes)
 
-	if length > binary.MaxVarintLen16 {
+	if length > math.MaxInt16 {
 		return errors.New(fmt.Sprintf("Context field overflow. Length: %d", length))
 	}
 
@@ -211,7 +232,7 @@ func encodeBytesInt16(bytes []byte, writer io.Writer) (err error) {
 func DecodeFrame(input io.Reader) (Frame, error) {
 	var size int32
 
-	err := binary.Read(input, binary.LittleEndian, &size)
+	err := binary.Read(input, binary.BigEndian, &size)
 	if err != nil {
 		return Frame{}, err
 	}
@@ -220,7 +241,7 @@ func DecodeFrame(input io.Reader) (Frame, error) {
 
 	limitReader := io.LimitReader(input, int64(size))
 
-	tpe, stream, msg, err := decodeMessage(limitReader, size)
+	tpe, stream, isFragment, msg, err := decodeMessage(limitReader, size)
 	if err != nil {
 		return Frame{}, err
 	}
@@ -228,33 +249,42 @@ func DecodeFrame(input io.Reader) (Frame, error) {
 	frame := Frame{
 		frameType: tpe,
 		streamId:  stream,
+		isFragment: isFragment,
 		message:   msg,
 	}
 
 	return frame, nil
 }
 
-func decodeMessage(input io.Reader, size int32) (tpe int8, stream int32, msg Message, err error) {
+func decodeMessage(input io.Reader, size int32) (tpe int8, stream int32, isFragment bool, msg Message, err error) {
 	var header int32
 
-	err = binary.Read(input, binary.LittleEndian, &header)
+	err = binary.Read(input, binary.BigEndian, &header)
 	if err != nil {
 		return
 	}
 
 	tpe = int8((header >> 24) & 0xff) // most significant byte is the type
-	stream = 0x00ffffff & header
+	stream = MaxStreamId & header
+	isFragment = isFrameFragment(header)	// only makes sense for dispatch frames...
 
 	switch tpe {
+	// TODO: fragments are handled incorrectly
 	case TdispatchTpe:
-		contexts, _err := decodeHeaders(input)
-		if _err != nil {
-			err = _err
+		var contexts, dtabs []Header
+		var dest []byte
+		contexts, err = decodeHeaders(input)
+		if err != nil {
 			return
 		}
-		dtabs, _err := decodeHeaders(input)
-		if _err != nil {
-			err = _err
+
+		dest, err = decodeInt16Bytes(input)
+		if err != nil {
+			return
+		}
+
+		dtabs, err = decodeHeaders(input)
+		if err != nil {
 			return
 		}
 
@@ -263,6 +293,7 @@ func decodeMessage(input io.Reader, size int32) (tpe int8, stream int32, msg Mes
 		io.ReadFull(input, body)
 		msg = &Tdispatch {
 			Contexts: contexts,
+			Dest: string(dest),
 			Dtabs: dtabs,
 			Body: body,
 		}
@@ -270,15 +301,28 @@ func decodeMessage(input io.Reader, size int32) (tpe int8, stream int32, msg Mes
 		return
 
 	case RdispatchTpe:
-		contexts, _err := decodeHeaders(input)
-		if _err != nil {
-			err = _err
+		var status int8
+		var contexts []Header
+
+		err = binary.Read(input, binary.BigEndian, &status)
+		if err != nil {
 			return
 		}
 
-		bodysize := int(size) - 4 - headersSize(contexts)
+		contexts, err = decodeHeaders(input)
+		if err != nil {
+			return
+		}
+
+		// The body size is the size minus streamId+tpe, status, and headersize
+		bodysize := int(size) - 4 - 1 - headersSize(contexts)
 		body := make([]byte, bodysize)
-		io.ReadFull(input, body)
+		_, err = io.ReadFull(input, body)
+		if err != nil {
+			return
+		}
+
+		// Successful message read.
 		msg = &Rdispatch {
 			Contexts: contexts,
 			Body: body,

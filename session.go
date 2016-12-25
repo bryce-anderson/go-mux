@@ -51,6 +51,7 @@ func (s *streamState) Read(p []byte) (n int, err error) {
 func (s *streamState) Write(p []byte) (n int, err error) {
 	dispatch := Tdispatch {
 		Contexts: []Header{},
+		Dest: 	  "/a/good/path",
 		Dtabs:    []Header{},
 		Body: p,
 	}
@@ -88,6 +89,11 @@ func (s *clientSession) Dispatch(in []byte) (out []byte, err error) {
 		return
 	}
 
+	_, err = stream.Write(in)
+	if err != nil {
+		return
+	}
+
 	out, err = ioutil.ReadAll(stream)
 	return
 }
@@ -113,7 +119,7 @@ func clientSessionReadLoop(s *clientSession) {
 	for {
 		frame, err := DecodeFrame(s.raw)
 		if err != nil {
-			panic("Graceful shutdown not implemented")
+			panic("Graceful shutdown not implemented. Error: " + err.Error())
 		}
 
 		switch msg := frame.message.(type) {
@@ -137,6 +143,12 @@ func clientSessionRdispatch(session *clientSession, frame *Frame, d *Rdispatch) 
 	}
 
 	stream.input <- d.Body
+
+	if !frame.isFragment {
+		close(stream.input)
+		delete(session.openStreams, frame.streamId)
+	}
+
 	return
 }
 
