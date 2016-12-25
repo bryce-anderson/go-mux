@@ -5,6 +5,7 @@ import (
 	"sync"
 	"errors"
 	"log"
+	"io/ioutil"
 )
 
 type Stream interface {
@@ -14,6 +15,8 @@ type Stream interface {
 type ClientSession interface {
 	NewStream() (Stream, error)
 	Close() error
+
+	Dispatch(data []byte) ([]byte, error)
 }
 
 type streamState struct {
@@ -76,6 +79,17 @@ type clientSession struct {
 	nextId      int32
 	raw         io.ReadWriteCloser
 	openStreams map[int32]*streamState
+}
+
+func (s *clientSession) Dispatch(in []byte) (out []byte, err error) {
+	stream, err := s.NewStream()
+
+	if err != nil {
+		return
+	}
+
+	out, err = ioutil.ReadAll(stream)
+	return
 }
 
 func (s *clientSession) NewStream() (stream Stream, err error) {
@@ -163,9 +177,12 @@ func (s *clientSession) nextStreamId() (int32, error) {
 }
 
 func NewClientSession(raw io.ReadWriteCloser) ClientSession {
-	return &clientSession{
+	session := &clientSession{
 		nextId: 1,
 		raw: raw,
 		openStreams: make(map[int32]*streamState),
 	}
+
+	go clientSessionReadLoop(session)
+	return session
 }

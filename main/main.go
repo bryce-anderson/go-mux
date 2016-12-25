@@ -3,23 +3,27 @@ package main
 import (
 	"fmt"
 	"github.com/bryce-anderson/mux"
-	"time"
+	"net"
 )
 
 func main() {
 	fmt.Printf("Hello, world!\n")
 
-	a := []int{1,2,3}
+	conn,err := net.Dial("tcp", "localhost:8081")
 
-	fmt.Print("Data: ", a)
+	if err != nil {
+		panic("Failed to connect")
+	}
 
-	b := a
+	session := mux.NewClientSession(conn)
 
-	b[0] = 255
+	response, err := session.Dispatch([]byte("some data"))
 
-	fmt.Print("Data: ", a)
+	if err != nil {
+		panic("Failed to dispatch")
+	}
 
-	time.Sleep(10000)
+	fmt.Printf("Received response: ", string(response))
 
 	fmt.Print("Finished.")
 }
