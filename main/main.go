@@ -18,14 +18,15 @@ func main() {
 
 	session := mux.NewClientSession(conn)
 
-	var threads = 1000000
+	var threads = 100000
+	var iterations = 1000000
 	waitGroup := sync.WaitGroup{}
 
 	waitGroup.Add(threads)
 
 	for i := 0; i < threads; i++ {
 		go func() {
-			err := do10Dispatches(session)
+			err := doDispatches(iterations, session)
 			if err != nil {
 				panic("Error: " + err.Error())
 			}
@@ -39,8 +40,8 @@ func main() {
 	fmt.Print("Finished.")
 }
 
-func do10Dispatches(session mux.ClientSession) error {
-	for i := 0; i < 10; i++ {
+func doDispatches(iterations int, session mux.ClientSession) error {
+	for i := 0; i < iterations; i++ {
 		data := fmt.Sprintf("Iteration %d: some data", i)
 		_, err := session.Dispatch([]byte(data))
 

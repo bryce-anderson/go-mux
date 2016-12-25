@@ -2,6 +2,7 @@ package mux
 
 import (
 	"io"
+	"bufio"
 	"sync"
 	"errors"
 	"log"
@@ -36,7 +37,6 @@ func (s *streamState) Read(p []byte) (n int, err error) {
 		data, ok := <- s.input
 		if !ok {
 			err = io.EOF
-			n = 0
 			return
 		}
 		s.buffer = data
@@ -65,12 +65,18 @@ func (s *streamState) Write(p []byte) (n int, err error) {
 	s.parent.lock.Lock()
 	defer s.parent.lock.Unlock()
 
-	err = EncodeFrame(&frame, s.parent.raw)
+	err = EncodeFrame(&frame, s.parent.rw)
 	if err != nil {
-		n = 0
-	} else {
-		n = len(p)
+		return
 	}
+
+	// Gotta make sure to flush so that the line gets the bytes
+	err = s.parent.rw.Flush()
+	if err != nil {
+		return
+	}
+
+	n = len(p)
 	return
 }
 
@@ -79,6 +85,7 @@ type clientSession struct {
 	lock        sync.Mutex
 	nextId      int32
 	raw         io.ReadWriteCloser
+	rw    	    *bufio.ReadWriter
 	openStreams map[int32]*streamState
 }
 
@@ -117,7 +124,7 @@ func (s *clientSession) NewStream() (stream Stream, err error) {
 
 func clientSessionReadLoop(s *clientSession) {
 	for {
-		frame, err := DecodeFrame(s.raw)
+		frame, err := DecodeFrame(s.rw)
 		if err != nil {
 			panic("Graceful shutdown not implemented. Error: " + err.Error())
 		}
@@ -189,9 +196,11 @@ func (s *clientSession) nextStreamId() (int32, error) {
 }
 
 func NewClientSession(raw io.ReadWriteCloser) ClientSession {
+	rw :=  bufio.NewReadWriter(bufio.NewReader(raw), bufio.NewWriter(raw))
 	session := &clientSession{
 		nextId: 1,
 		raw: raw,
+		rw: rw,
 		openStreams: make(map[int32]*streamState),
 	}
 
