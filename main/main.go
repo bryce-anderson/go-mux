@@ -22,7 +22,7 @@ func main() {
 		if err != nil {
 			panic("Failed to connect: " + err.Error())
 		}
-		
+
 		session, err := mux.NewClientSession(conn, math.MaxInt32)
 		if err != nil {
 			fmt.Printf("Session %d failed\n", s)
