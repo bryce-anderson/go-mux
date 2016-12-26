@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"io/ioutil"
+	"sync"
 )
 
 const MaxStreamId = 0x007fffff	// 23 bits
@@ -24,9 +25,32 @@ const RinitTpe = -68
 const BadRerrTpe = 127	// Old implementation fluke... Two's complement and all...
 const RerrTpe = -128
 
+
+type codec interface {
+	// Run serially. Reads a single frame from the wire
+	decodeFrame(in io.Reader) (Frame, error)
+
+	// May be run in parallel. The types of Messages in frames are determined by the protocol version
+	encodeFrame(out io.Writer, frame *Frame) error
+}
+
+type baseCodec struct {
+	writeLock sync.Mutex
+}
+
+// simple decoder function
+func (c *baseCodec) decodeFrame(in io.Reader) (Frame, error) {
+	return DecodeFrame(in)
+}
+
+// simple encoder function
+func (c *baseCodec) encodeFrame(out io.Writer, frame *Frame) error {
+	c.writeLock.Lock()
+	defer c.writeLock.Unlock()
+	return EncodeFrame(out, frame)
+}
+
 type Frame struct {
-	frameType 	int8
-	isFragment	bool
 	streamId  	int32
 	message   	Message
 }
@@ -35,21 +59,25 @@ func isFrameFragment(streamId int32) bool {
 	return (streamId & FragmentMask) != 0
 }
 
-func EncodeFrame(writer io.Writer, frame *Frame) error {
+func encodeFrameHeader(writer io.Writer, frame *Frame) (err error) {
 	// Write the message size as a prefix
 	size := frame.message.Size() + 4
 
-	err := binary.Write(writer, binary.BigEndian, int32(size))
+	err = binary.Write(writer, binary.BigEndian, int32(size))
 	if err != nil {
 		return err
 	}
 
-	header := int32(frame.frameType)<<24 | frame.streamId
+	header := int32(frame.message.Type()) << 24 | frame.streamId
 	err = binary.Write(writer, binary.BigEndian, header)
+	return
+}
+
+func EncodeFrame(writer io.Writer, frame *Frame) error {
+	err := encodeFrameHeader(writer, frame)
 	if err != nil {
 		return err
 	}
-
 	return frame.message.Encode(writer)
 }
 
@@ -80,6 +108,10 @@ type Rdispatch struct {
 type Tinit struct {
 	version int16
 	headers []Header
+}
+
+type Fragment struct {
+	data []byte
 }
 
 func (t *Tinit) Size() int {
@@ -332,10 +364,10 @@ func DecodeFrame(input io.Reader) (Frame, error) {
 	}
 
 	// Slice a frame off the reader. The entire frame must be read or else we will be sad
-
-	return decodeMessage(input, size)
+	return decodeFrame(input, size)
 }
 
+// decode a Tdispatch frame from the input. The size is the payload of the Tdispatch frame
 func decodeTdispatch(input io.Reader, size int32) (msg *Tdispatch, err error) {
 	var contexts, dtabs []Header
 	var dest []byte
@@ -354,7 +386,7 @@ func decodeTdispatch(input io.Reader, size int32) (msg *Tdispatch, err error) {
 		return
 	}
 
-	bodysize := int(size) - 4 - headersSize(contexts) - headersSize(dtabs)
+	bodysize := int(size) - headersSize(contexts) - headersSize(dtabs)
 	body := make([]byte, bodysize)
 	io.ReadFull(input, body)
 	msg = &Tdispatch {
@@ -380,8 +412,8 @@ func decodeRdispatch(input io.Reader, size int32) (msg *Rdispatch, err error) {
 		return
 	}
 
-	// The body size is the size minus streamId+tpe, status, and headersize
-	bodysize := int(size) - 4 - 1 - headersSize(contexts)
+	// The body size is the size minus status, and headersize
+	bodysize := int(size) - 1 - headersSize(contexts)
 	body := make([]byte, bodysize)
 	_, err = io.ReadFull(input, body)
 	if err != nil {
@@ -397,39 +429,45 @@ func decodeRdispatch(input io.Reader, size int32) (msg *Rdispatch, err error) {
 	return
 }
 
-func decodeMessage(in io.Reader, size int32) (frame Frame, err error) {
+func decodeFrame(in io.Reader, size int32) (frame Frame, err error) {
 	limitReader := io.LimitReader(in, int64(size))
 
+	// Read the header of the frame
 	var header int32
-
 	err = binary.Read(limitReader, binary.BigEndian, &header)
 	if err != nil {
 		return
 	}
 
-	frame.frameType = int8((header >> 24) & 0xff) // most significant byte is the type
+	frameTpe := int8((header >> 24) & 0xff) // most significant byte is the type
 	frame.streamId = MaxStreamId & header
-	frame.isFragment = isFrameFragment(header)	// only makes sense for dispatch frames...
 
-	switch frame.frameType {
+	// subtract 4 bytes for the header
+	frame.message, err = decodeStandardFrame(limitReader, frameTpe, size - 4)
+	return
+}
+
+// Expects the reader to signal EOF at the end of the frame
+func decodeStandardFrame(in io.Reader, tpe int8, size int32) (msg Message, err error) {
+	switch tpe {
 	// TODO: fragments are handled incorrectly
 	case TdispatchTpe:
-		frame.message, err = decodeTdispatch(limitReader, size)
+		msg, err = decodeTdispatch(in, size)
 
 	case RdispatchTpe:
-		frame.message, err = decodeRdispatch(limitReader, size)
+		msg, err = decodeRdispatch(in, size)
 
 	case TpingTpe:
-		frame.message = &Tping{}
+		msg = &Tping{}
 
 	case RpingTpe:
-		frame.message = &Rping{}
+		msg = &Rping{}
 
 	case TinitTpe:
 		var headers []Header
 		var version int16
-		version, headers, err = decodeInit(limitReader)
-		frame.message = &Tinit{
+		version, headers, err = decodeInit(in)
+		msg = &Tinit{
 			version: version,
 			headers: headers,
 		}
@@ -437,8 +475,8 @@ func decodeMessage(in io.Reader, size int32) (frame Frame, err error) {
 	case RinitTpe:
 		var headers []Header
 		var version int16
-		version, headers, err = decodeInit(limitReader)
-		frame.message = &Rinit{
+		version, headers, err = decodeInit(in)
+		msg = &Rinit{
 			version: version,
 			headers: headers,
 		}
@@ -447,13 +485,13 @@ func decodeMessage(in io.Reader, size int32) (frame Frame, err error) {
 		fallthrough
 	case BadRerrTpe:
 		var bytes []byte
-		bytes, err = ioutil.ReadAll(limitReader)
-		frame.message = &Rerr{
+		bytes, err = ioutil.ReadAll(in)
+		msg = &Rerr{
 			error: string(bytes),
 		}
 
 	default:
-		err = errors.New(fmt.Sprintf("Found invalid frame type: %d", frame.frameType))
+		err = errors.New(fmt.Sprintf("Found invalid frame type: %d", tpe))
 		return
 	}
 

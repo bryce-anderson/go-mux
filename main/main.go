@@ -5,35 +5,41 @@ import (
 	"github.com/bryce-anderson/mux"
 	"net"
 	"sync"
+	"math"
+	"log"
 )
 
 func main() {
 	fmt.Printf("Hello, world!\n")
 
-	conn,err := net.Dial("tcp", "localhost:8081")
-
-	if err != nil {
-		panic("Failed to connect: " + err.Error())
-	}
-
-	session := mux.NewClientSession(conn)
-
-	var threads = 100000
+	var sessions = 100
+	var threads = 1000
 	var iterations = 1000000
 	waitGroup := sync.WaitGroup{}
 
-	waitGroup.Add(threads)
-
-	for i := 0; i < threads; i++ {
-		go func() {
-			err := doDispatches(iterations, session)
-			if err != nil {
-				panic("Error: " + err.Error())
+	for s := 0; s < sessions; s++ {
+		conn,err := net.Dial("tcp", "localhost:8081")
+		if err != nil {
+			panic("Failed to connect: " + err.Error())
+		}
+		
+		session, err := mux.NewClientSession(conn, math.MaxInt32)
+		if err != nil {
+			fmt.Printf("Session %d failed\n", s)
+		} else {
+			for i := 0; i < threads; i++ {
+				waitGroup.Add(1)
+				go func() {
+					err := doDispatches(iterations, session)
+					if err != nil {
+						log.Printf("Thread %d of session %d failed. Error: %s\n", i, s, err.Error())
+					}
+					waitGroup.Done()
+				}()
 			}
-			waitGroup.Done()
-		}()
-	}
 
+		}
+	}
 	waitGroup.Wait()
 
 
@@ -43,7 +49,7 @@ func main() {
 func doDispatches(iterations int, session mux.ClientSession) error {
 	for i := 0; i < iterations; i++ {
 		data := fmt.Sprintf("Iteration %d: some data", i)
-		_, err := session.Dispatch([]byte(data))
+		_, err := mux.SimpleDispatch(session, []byte(data))
 
 		if err != nil {
 			return err
