@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"github.com/bryce-anderson/mux"
-	"net"
 	"sync"
 	"math"
 	"log"
@@ -18,12 +17,7 @@ func main() {
 	waitGroup := sync.WaitGroup{}
 
 	for s := 0; s < sessions; s++ {
-		conn,err := net.Dial("tcp", "localhost:8081")
-		if err != nil {
-			panic("Failed to connect: " + err.Error())
-		}
-
-		session, err := mux.NewClientSession(conn, math.MaxInt32)
+		session, err := mux.NewClientSession("localhost:8081", math.MaxInt32)
 		if err != nil {
 			fmt.Printf("Session %d failed\n", s)
 		} else {

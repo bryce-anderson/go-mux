@@ -8,6 +8,7 @@ import (
 	"math"
 	"io/ioutil"
 	"sync"
+	"bufio"
 )
 
 type codec interface {
@@ -15,7 +16,7 @@ type codec interface {
 	decodeFrame(in io.Reader) (Frame, error)
 
 	// May be run in parallel. The types of Messages in frames are determined by the protocol version
-	encodeFrame(out io.Writer, frame *Frame) error
+	encodeFrame(out *bufio.Writer, frame *Frame) error
 }
 
 // Base codec implementation. Doesn't support message fragmenting
@@ -29,10 +30,16 @@ func (c *baseCodec) decodeFrame(in io.Reader) (Frame, error) {
 }
 
 // simple encoder function
-func (c *baseCodec) encodeFrame(out io.Writer, frame *Frame) error {
+func (c *baseCodec) encodeFrame(out *bufio.Writer, frame *Frame) (err error) {
 	c.writeLock.Lock()
 	defer c.writeLock.Unlock()
-	return EncodeFrame(out, frame)
+	err = EncodeFrame(out, frame)
+	if err != nil {
+		return
+	}
+
+	// Flush the frame
+	return out.Flush()
 }
 
 func isFrameFragment(streamId int32) bool {

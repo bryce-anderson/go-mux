@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"time"
 	"math"
+	"net"
 )
 
 const LatestMuxVersion = 0x0001
@@ -84,10 +85,11 @@ func (s *baseClientSession) Dispatch(in Tdispatch) (out Rdispatch, err error) {
 		message: &in,
 	}
 
-	err = s.c.encodeFrame(s.rw, &frame)
+	err = s.c.encodeFrame(s.rw.Writer, &frame)
 	if err != nil {
 		return
 	}
+
 
 	message, ok := <- stream.input
 
@@ -169,7 +171,12 @@ func makeStreamState(parent *baseClientSession) (state *baseStreamState, err err
 	return
 }
 
-func NewClientSession(raw io.ReadWriteCloser, maxFrameSize int32) (session ClientSession, err error) {
+func NewClientSession(address string, maxFrameSize int32) (session ClientSession, err error) {
+	var raw net.Conn
+	raw, err = net.Dial("tcp", address)
+	if err != nil {
+		return
+	}
 
 	if maxFrameSize == math.MaxInt32 {
 		// No need to negotiate framing, its slower anyway
